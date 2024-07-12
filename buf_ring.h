@@ -68,6 +68,7 @@ static __inline int
 buf_ring_enqueue(struct buf_ring *br, void *buf)
 {
 	uint32_t prod_head, prod_next, cons_tail;
+	uint32_t mask, prod_idx;
 #ifdef DEBUG_BUFRING
 	int i;
 
@@ -83,15 +84,20 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 			    buf, i, br->br_prod_tail, br->br_cons_tail);
 #endif	
 	critical_enter();
+	mask = br->br_prod_mask;
 	do {
 		prod_head = br->br_prod_head;
-		prod_next = (prod_head + 1) & br->br_prod_mask;
+#ifdef EARLY_MASK
+		prod_next = (prod_head + 1) & mask;
+#else
+		prod_next = prod_head + 1;
+#endif
 		cons_tail = br->br_cons_tail;
 
-		if (prod_next == cons_tail) {
+		if ((prod_next & mask) == (cons_tail & mask)) {
 			rmb();
-			if (prod_head == br->br_prod_head &&
-			    cons_tail == br->br_cons_tail) {
+			if ((prod_head & mask) == (br->br_prod_head & mask) &&
+			    (cons_tail & mask) == (br->br_cons_tail & mask)) {
 				br->br_drops++;
 				critical_exit();
 				return (ENOBUFS);
@@ -99,11 +105,16 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 			continue;
 		}
 	} while (!atomic_cmpset_acq_int(&br->br_prod_head, prod_head, prod_next));
+#ifdef EARLY_MASK
+	prod_idx = prod_head;
+#else
+	prod_idx = prod_head & mask;
+#endif
 #ifdef DEBUG_BUFRING
-	if (br->br_ring[prod_head] != NULL)
+	if (br->br_ring[prod_idx] != NULL)
 		panic("dangling value in enqueue");
 #endif	
-	br->br_ring[prod_head] = buf;
+	br->br_ring[prod_idx] = buf;
 
 	/*
 	 * If there are other enqueues in progress
@@ -125,22 +136,33 @@ static __inline void *
 buf_ring_dequeue_mc(struct buf_ring *br)
 {
 	uint32_t cons_head, cons_next;
+	uint32_t cons_idx, mask;
 	void *buf;
 
 	critical_enter();
+	mask = br->br_cons_mask;
 	do {
 		cons_head = br->br_cons_head;
-		cons_next = (cons_head + 1) & br->br_cons_mask;
+#ifdef EARLY_MASK
+		cons_next = (cons_head + 1) mask;
+#else
+		cons_next = cons_head + 1;
+#endif
 
-		if (cons_head == br->br_prod_tail) {
+		if ((cons_head & mask) == (br->br_prod_tail & mask)) {
 			critical_exit();
 			return (NULL);
 		}
 	} while (!atomic_cmpset_acq_int(&br->br_cons_head, cons_head, cons_next));
+#ifdef EARLY_MASK
+	cons_idx = cons_head;
+#else
+	cons_idx = cons_head & mask;
+#endif
 
-	buf = br->br_ring[cons_head];
+	buf = br->br_ring[cons_idx];
 #ifdef DEBUG_BUFRING
-	br->br_ring[cons_head] = NULL;
+	br->br_ring[cons_idx] = NULL;
 #endif
 	/*
 	 * If there are other dequeues in progress
@@ -165,6 +187,7 @@ static __inline void *
 buf_ring_dequeue_sc(struct buf_ring *br)
 {
 	uint32_t cons_head, cons_next;
+	uint32_t cons_idx, mask;
 #ifdef PREFETCH_DEFINED
 	uint32_t cons_next_next;
 #endif
@@ -196,6 +219,7 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 	 *
 	 * <1> Load (on core 1) from br->br_ring[cons_head] can be reordered (speculative readed) by CPU.
 	 */	
+	mask = br->br_cons_mask;
 #if defined(__arm__) || defined(__aarch64__)
 	cons_head = atomic_load_acq_32(&br->br_cons_head);
 #else
@@ -203,12 +227,16 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 #endif
 	prod_tail = atomic_load_acq_32(&br->br_prod_tail);
 
+#ifdef EARLY_MASK
 	cons_next = (cons_head + 1) & br->br_cons_mask;
+#else
+	cons_next = cons_head + 1;
+#endif
 #ifdef PREFETCH_DEFINED
 	cons_next_next = (cons_head + 2) & br->br_cons_mask;
 #endif
 
-	if (cons_head == prod_tail) 
+	if ((cons_head & mask) == (prod_tail & mask)) 
 		return (NULL);
 
 #ifdef PREFETCH_DEFINED	
@@ -218,11 +246,12 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 			prefetch(br->br_ring[cons_next_next]);
 	}
 #endif
+	cons_idx = cons_head & mask;
 	br->br_cons_head = cons_next;
-	buf = br->br_ring[cons_head];
+	buf = br->br_ring[cons_idx];
 
 #ifdef DEBUG_BUFRING
-	br->br_ring[cons_head] = NULL;
+	br->br_ring[cons_idx] = NULL;
 	if (!mtx_owned(br->br_lock))
 		panic("lock not held on single consumer dequeue");
 	if (br->br_cons_tail != cons_head)
@@ -243,16 +272,22 @@ buf_ring_advance_sc(struct buf_ring *br)
 {
 	uint32_t cons_head, cons_next;
 	uint32_t prod_tail;
+	uint32_t mask;
 
 	cons_head = br->br_cons_head;
 	prod_tail = br->br_prod_tail;
 
-	cons_next = (cons_head + 1) & br->br_cons_mask;
-	if (cons_head == prod_tail) 
+	mask = br->br_cons_mask;
+#ifdef EARLY_MASK
+	cons_next = (cons_head + 1) & mask;
+#else
+	cons_next = cons_head + 1;
+#endif
+	if ((cons_head & mask) == (prod_tail & mask))
 		return;
 	br->br_cons_head = cons_next;
 #ifdef DEBUG_BUFRING
-	br->br_ring[cons_head] = NULL;
+	br->br_ring[cons_head & mask] = NULL;
 #endif
 	br->br_cons_tail = cons_next;
 }
@@ -276,9 +311,12 @@ buf_ring_advance_sc(struct buf_ring *br)
 static __inline void
 buf_ring_putback_sc(struct buf_ring *br, void *new)
 {
-	KASSERT(br->br_cons_head != br->br_prod_tail, 
+	uint32_t mask;
+
+	mask = br->br_cons_mask;
+	KASSERT((br->br_cons_head & mask) != (br->br_prod_tail & mask),
 		("Buf-Ring has none in putback")) ;
-	br->br_ring[br->br_cons_head] = new;
+	br->br_ring[br->br_cons_head & mask] = new;
 }
 
 /*
@@ -289,26 +327,29 @@ buf_ring_putback_sc(struct buf_ring *br, void *new)
 static __inline void *
 buf_ring_peek(struct buf_ring *br)
 {
+	uint32_t mask;
 
 #ifdef DEBUG_BUFRING
 	if ((br->br_lock != NULL) && !mtx_owned(br->br_lock))
 		panic("lock not held on single consumer dequeue");
 #endif	
+	mask = br->br_cons_mask;
 	/*
 	 * I believe it is safe to not have a memory barrier
 	 * here because we control cons and tail is worst case
 	 * a lagging indicator so we worst case we might
 	 * return NULL immediately after a buffer has been enqueued
 	 */
-	if (br->br_cons_head == br->br_prod_tail)
+	if ((br->br_cons_head & mask) == (br->br_prod_tail & mask))
 		return (NULL);
 
-	return (br->br_ring[br->br_cons_head]);
+	return (br->br_ring[br->br_cons_head & mask]);
 }
 
 static __inline void *
 buf_ring_peek_clear_sc(struct buf_ring *br)
 {
+	uint32_t mask;
 #ifdef DEBUG_BUFRING
 	void *ret;
 
@@ -316,7 +357,8 @@ buf_ring_peek_clear_sc(struct buf_ring *br)
 		panic("lock not held on single consumer dequeue");
 #endif	
 
-	if (br->br_cons_head == br->br_prod_tail)
+	mask = br->br_cons_mask;
+	if ((br->br_cons_head & mask) == (br->br_prod_tail & mask))
 		return (NULL);
 
 #if defined(__arm__) || defined(__aarch64__)
@@ -338,11 +380,11 @@ buf_ring_peek_clear_sc(struct buf_ring *br)
 	 * Single consumer, i.e. cons_head will not move while we are
 	 * running, so atomic_swap_ptr() is not necessary here.
 	 */
-	ret = br->br_ring[br->br_cons_head];
-	br->br_ring[br->br_cons_head] = NULL;
+	ret = br->br_ring[br->br_cons_head & mask];
+	br->br_ring[br->br_cons_head & mask] = NULL;
 	return (ret);
 #else
-	return (br->br_ring[br->br_cons_head]);
+	return (br->br_ring[br->br_cons_head & mask]);
 #endif
 }
 
@@ -350,7 +392,8 @@ static __inline int
 buf_ring_full(struct buf_ring *br)
 {
 
-	return (((br->br_prod_head + 1) & br->br_prod_mask) == br->br_cons_tail);
+	return (((br->br_prod_head + 1) & br->br_prod_mask) ==
+	    (br->br_cons_tail & br->br_cons_mask));
 }
 
 static __inline int
