@@ -86,7 +86,7 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 	critical_enter();
 	mask = br->br_prod_mask;
 	do {
-		prod_head = br->br_prod_head;
+		prod_head = atomic_load_acq_32(&br->br_prod_head);
 #ifdef EARLY_MASK
 		prod_next = (prod_head + 1) & mask;
 #else
@@ -142,7 +142,7 @@ buf_ring_dequeue_mc(struct buf_ring *br)
 	critical_enter();
 	mask = br->br_cons_mask;
 	do {
-		cons_head = br->br_cons_head;
+		cons_head = atomic_load_acq_32(&br->br_cons_head);
 #ifdef EARLY_MASK
 		cons_next = (cons_head + 1) mask;
 #else
@@ -258,7 +258,7 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 		panic("inconsistent list cons_tail=%d cons_head=%d",
 		    br->br_cons_tail, cons_head);
 #endif
-	br->br_cons_tail = cons_next;
+	atomic_store_rel_int(&br->br_cons_tail, cons_next);
 	return (buf);
 }
 
