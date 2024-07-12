@@ -35,13 +35,9 @@
 #include <machine/atomic.h>
 #include <machine/cpu.h>
 
-#ifdef DEBUG_BUFRING
-#ifdef _KERNEL
+#if defined(DEBUG_BUFRING) && defined(_KERNEL)
 #include <sys/lock.h>
 #include <sys/mutex.h>
-#else
-#error "DEBUG_BUFRING is only supported in kernel"
-#endif
 #endif
 
 struct buf_ring {
@@ -54,7 +50,7 @@ struct buf_ring {
 	volatile uint32_t	br_cons_tail;
 	int		 	br_cons_size;
 	int              	br_cons_mask;
-#ifdef DEBUG_BUFRING
+#if defined(DEBUG_BUFRING) && defined(_KERNEL)
 	struct mtx		*br_lock;
 #endif	
 	void			*br_ring[0] __aligned(CACHE_LINE_SIZE);
@@ -70,15 +66,16 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 	uint32_t prod_head, prod_next, cons_tail;
 	uint32_t mask, prod_idx;
 #ifdef DEBUG_BUFRING
-	int i;
+	uint32_t i;
 
 	/*
 	 * Note: It is possible to encounter an mbuf that was removed
 	 * via drbr_peek(), and then re-added via drbr_putback() and
 	 * trigger a spurious panic.
 	 */
-	for (i = br->br_cons_head; i != br->br_prod_head;
-	     i = ((i + 1) & br->br_cons_mask))
+	mask = br->br_cons_mask;
+	for (i = (br->br_cons_head & mask); i != (br->br_prod_head & mask);
+	     i = ((i + 1) & mask))
 		if (br->br_ring[i] == buf)
 			panic("buf=%p already enqueue at %d prod=%d cons=%d",
 			    buf, i, br->br_prod_tail, br->br_cons_tail);
@@ -252,8 +249,10 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 
 #ifdef DEBUG_BUFRING
 	br->br_ring[cons_idx] = NULL;
+#ifdef _KERNEL
 	if (!mtx_owned(br->br_lock))
 		panic("lock not held on single consumer dequeue");
+#endif
 	if (br->br_cons_tail != cons_head)
 		panic("inconsistent list cons_tail=%d cons_head=%d",
 		    br->br_cons_tail, cons_head);
@@ -329,7 +328,7 @@ buf_ring_peek(struct buf_ring *br)
 {
 	uint32_t mask;
 
-#ifdef DEBUG_BUFRING
+#if defined(DEBUG_BUFRING) && defined(_KERNEL)
 	if ((br->br_lock != NULL) && !mtx_owned(br->br_lock))
 		panic("lock not held on single consumer dequeue");
 #endif	
@@ -353,8 +352,10 @@ buf_ring_peek_clear_sc(struct buf_ring *br)
 #ifdef DEBUG_BUFRING
 	void *ret;
 
+#ifdef _KERNEL
 	if (!mtx_owned(br->br_lock))
 		panic("lock not held on single consumer dequeue");
+#endif
 #endif	
 
 	mask = br->br_cons_mask;
