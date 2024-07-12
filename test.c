@@ -41,6 +41,22 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+/* #define DEBUG_BUFRING */
+
+#ifdef DEBUG_BUFRING
+static void
+panic(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+	exit(1);
+}
+#endif
+
 static void
 critical_enter(void)
 {
