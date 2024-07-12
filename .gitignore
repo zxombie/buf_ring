@@ -1,0 +1,6 @@
+.depend*
+test
+*.o
+*.debug
+*.full
+*.core
