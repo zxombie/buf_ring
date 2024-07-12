@@ -54,7 +54,9 @@ critical_exit(void)
 #include "buf_ring.h"
 
 #define	PROD_COUNT	2
-#define	PROD_ITERATIONS	10000000
+#define	PROD_ITERATIONS	100000000
+
+#define	CONSUMER_MC
 
 static struct buf_ring *br;
 static _Atomic bool prod_done = false;
