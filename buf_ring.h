@@ -84,11 +84,7 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 	mask = br->br_prod_mask;
 	do {
 		prod_head = atomic_load_acq_32(&br->br_prod_head);
-#ifdef EARLY_MASK
-		prod_next = (prod_head + 1) & mask;
-#else
 		prod_next = prod_head + 1;
-#endif
 		cons_tail = br->br_cons_tail;
 
 		if ((prod_next & mask) == (cons_tail & mask)) {
@@ -102,11 +98,7 @@ buf_ring_enqueue(struct buf_ring *br, void *buf)
 			continue;
 		}
 	} while (!atomic_cmpset_acq_int(&br->br_prod_head, prod_head, prod_next));
-#ifdef EARLY_MASK
-	prod_idx = prod_head;
-#else
 	prod_idx = prod_head & mask;
-#endif
 #ifdef DEBUG_BUFRING
 	if (br->br_ring[prod_idx] != NULL)
 		panic("dangling value in enqueue");
@@ -140,22 +132,14 @@ buf_ring_dequeue_mc(struct buf_ring *br)
 	mask = br->br_cons_mask;
 	do {
 		cons_head = atomic_load_acq_32(&br->br_cons_head);
-#ifdef EARLY_MASK
-		cons_next = (cons_head + 1) mask;
-#else
 		cons_next = cons_head + 1;
-#endif
 
 		if ((cons_head & mask) == (br->br_prod_tail & mask)) {
 			critical_exit();
 			return (NULL);
 		}
 	} while (!atomic_cmpset_acq_int(&br->br_cons_head, cons_head, cons_next));
-#ifdef EARLY_MASK
-	cons_idx = cons_head;
-#else
 	cons_idx = cons_head & mask;
-#endif
 
 	buf = br->br_ring[cons_idx];
 #ifdef DEBUG_BUFRING
@@ -224,11 +208,7 @@ buf_ring_dequeue_sc(struct buf_ring *br)
 #endif
 	prod_tail = atomic_load_acq_32(&br->br_prod_tail);
 
-#ifdef EARLY_MASK
-	cons_next = (cons_head + 1) & br->br_cons_mask;
-#else
 	cons_next = cons_head + 1;
-#endif
 #ifdef PREFETCH_DEFINED
 	cons_next_next = (cons_head + 2) & br->br_cons_mask;
 #endif
@@ -277,11 +257,7 @@ buf_ring_advance_sc(struct buf_ring *br)
 	prod_tail = br->br_prod_tail;
 
 	mask = br->br_cons_mask;
-#ifdef EARLY_MASK
-	cons_next = (cons_head + 1) & mask;
-#else
 	cons_next = cons_head + 1;
-#endif
 	if ((cons_head & mask) == (prod_tail & mask))
 		return;
 	br->br_cons_head = cons_next;
