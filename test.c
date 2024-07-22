@@ -29,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/errno.h>
 
+#include <machine/atomic.h>
 #include <machine/cpu.h>
 #include <machine/cpufunc.h>
 
@@ -77,6 +78,7 @@ critical_exit(void)
 static enum {
 	CT_UNKNOWN,
 	CT_MC,
+	CT_MC_MT,
 	CT_SC,
 	CT_PEEK,
 	CT_PEEK_CLEAR,
@@ -87,6 +89,9 @@ static unsigned int prod_count;
 static struct buf_ring *br;
 static _Atomic bool prod_done = false;
 static _Atomic int prod_done_count = 0;
+static _Atomic size_t total_cons_count = 0;
+
+static uint64_t *mt_seen;
 
 static void *
 producer(void *arg)
@@ -130,6 +135,7 @@ consumer(void *arg)
 	while (!atomic_load(&prod_done) || !buf_ring_empty(br)) {
 		switch(cons_type) {
 		case CT_MC:
+		case CT_MC_MT:
 			val = buf_ring_dequeue_mc(br);
 			break;
 		case CT_SC:
@@ -152,17 +158,30 @@ consumer(void *arg)
 			consume_count++;
 			curr = (size_t)(uintptr_t)val;
 			id = curr % prod_count;
-			if (curr != max_vals[id] + prod_count)
-				printf("Incorrect val: %zu Expect: %zu "
-				    "Difference: %zd\n", curr,
-				    max_vals[id] + prod_count,
-				    curr - max_vals[id] - prod_count);
+			if (cons_type != CT_MC_MT) {
+				if (curr != max_vals[id] + prod_count)
+					printf("Incorrect val: %zu Expect: %zu "
+					    "Difference: %zd\n", curr,
+					    max_vals[id] + prod_count,
+					    curr - max_vals[id] - prod_count);
+			} else {
+				size_t idx, bit;
+
+				idx = ((size_t)(uintptr_t)val - 1) /
+				    (sizeof(*mt_seen) * NBBY);
+				bit = ((size_t)(uintptr_t)val - 1) %
+				    (sizeof(*mt_seen) * NBBY);
+
+				if (atomic_testandset_64(&mt_seen[idx], bit))
+					printf("Repeat ID: %zx\n", (size_t)(uintptr_t)val);
+			}
+
 			max_vals[id] = (uintptr_t)val;
 		}
 	}
 
-	printf("Expected: %zu\n", (size_t)PROD_ITERATIONS * prod_count);
-	printf("Received: %zu\n", consume_count);
+	atomic_fetch_add(&total_cons_count, consume_count);
+
 	for (unsigned int i = 0; i < prod_count; i++)
 		printf("max[%d] = %zu\n", i, max_vals[i]);
 
@@ -180,7 +199,7 @@ static struct option longopts[] = {
 static void
 usage(void)
 {
-	errx(1, "test --cons-type=<mc|sc|peek|peek-clear> --prod-count=<prod thread count> [--buf-size=<buf_ring size>]");
+	errx(1, "test --cons-type=<mc|mc-mt|sc|peek|peek-clear> --prod-count=<prod thread count> [--buf-size=<buf_ring size>]");
 }
 
 static uint32_t
@@ -200,7 +219,7 @@ int
 main(int argc, char *argv[])
 {
 	pthread_t *prod;
-	pthread_t cons;
+	pthread_t cons[2];
 	const char *errstr;
 	uint32_t size;
 	int ch, ret;
@@ -221,6 +240,8 @@ main(int argc, char *argv[])
 		case 'c':
 			if (strcmp(optarg, "mc") == 0) {
 				cons_type = CT_MC;
+			} else if (strcmp(optarg, "mc-mt") == 0) {
+				cons_type = CT_MC_MT;
 			} else if (strcmp(optarg, "sc") == 0) {
 				cons_type = CT_SC;
 			} else if (strcmp(optarg, "peek") == 0) {
@@ -255,10 +276,23 @@ main(int argc, char *argv[])
 	if (size == 0)
 		size = next_power_of_2(prod_count);
 
+	if (cons_type == CT_MC_MT) {
+		size_t entries;
+
+		entries = (size_t)PROD_ITERATIONS * prod_count;
+		entries = roundup2(entries, sizeof(*mt_seen));
+		mt_seen = calloc(entries / (sizeof(*mt_seen) * NBBY),
+		    sizeof(*mt_seen));
+	}
+
 	br = buf_ring_alloc(size);
 
-	ret = pthread_create(&cons, NULL, consumer, NULL);
+	ret = pthread_create(&cons[0], NULL, consumer, NULL);
 	assert(ret == 0);
+	if (cons_type == CT_MC_MT) {
+		ret = pthread_create(&cons[1], NULL, consumer, NULL);
+		assert(ret == 0);
+	}
 
 	prod = calloc(prod_count, sizeof(*prod));
 	assert(prod != NULL);
@@ -272,8 +306,15 @@ main(int argc, char *argv[])
 		ret = pthread_join(prod[i], NULL);
 		assert(ret == 0);
 	}
-	ret = pthread_join(cons, NULL);
+	ret = pthread_join(cons[0], NULL);
 	assert(ret == 0);
+	if (cons_type == CT_MC_MT) {
+		ret = pthread_join(cons[1], NULL);
+		assert(ret == 0);
+	}
+
+	printf("Expected: %zu\n", (size_t)PROD_ITERATIONS * prod_count);
+	printf("Received: %zu\n", total_cons_count);
 
 	buf_ring_free(br);
 
